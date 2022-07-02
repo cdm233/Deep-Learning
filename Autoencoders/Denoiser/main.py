@@ -24,23 +24,26 @@ class autoEncoder(nn.Module):
         self.encoder = nn.Sequential(
             nn.Linear(28 * 28, 20 * 20),
             nn.ReLU(),
+            nn.Tanh(),
 
             nn.Linear(20 * 20, 15 * 15),
             nn.ReLU(),
+            nn.Tanh(),
 
             nn.Linear(15 * 15, 11 * 11),
-            nn.ReLU()
+            nn.Tanh(),
+            nn.ReLU(),
         )
 
-        self.decoder = nn.Sequential(
+        self.decoder = nn.Sequential(           
             nn.Linear(11 * 11, 15 * 15),
-            nn.ReLU(),
+            nn.Tanh(),
 
             nn.Linear(15 * 15, 20 * 20),
-            nn.ReLU(),
+            nn.Tanh(),
 
             nn.Linear(20 * 20, 28 * 28),
-            nn.ReLU()
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -48,10 +51,14 @@ class autoEncoder(nn.Module):
         x = self.decoder(x)
         return x
 
-def loadModel(noiseStrength, validationBatch, path):
-    model = autoEncoder()
-    model.load_state_dict(torch.load(path))
-    model.eval()
+def loadModel(noiseStrength, validationBatch, path, type = 0):
+    if(type == 0):
+        model = autoEncoder()
+        model.load_state_dict(torch.load(path))
+        model.eval()
+    else:
+        model = torch.load(path)
+        model.eval()
 
     for i in range(4):
         validationBatch[0][i][0] = validationBatch[0][i][0] +  noiseStrength* torch.randn(*validationBatch[0][i][0].shape)
@@ -76,13 +83,31 @@ def loadModel(noiseStrength, validationBatch, path):
     plt.show()
     return
 
-def trainModel(model, train, epochs, noiseStrength):
+def evaluateLoss(net, loader):
+    loss = 0
+    criterion = nn.MSELoss()
+
+    for imgs, labels in loader:
+        imgs = imgs.view(-1, 784).cuda()
+        
+        outputs = net(imgs)
+
+        # compute training reconstruction loss
+        train_loss = criterion(outputs, imgs)
+        loss += train_loss.item()
+
+    return loss/len(loader)
+
+def trainModel(model, train, val, epochs, noiseStrength):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
     lossArr = []
+    valLossArr = []
     bestLoss = None
+
     for epoch in range(epochs):
         loss = 0
+        valLoss = 0
         sizeee = len(train)
         print(f"Training on Epoch {epoch+1}/{epochs}")
         for i, (batch_features, label) in enumerate(train, 0):
@@ -117,6 +142,7 @@ def trainModel(model, train, epochs, noiseStrength):
             loss += train_loss.item()
 
             print(f"  Currently on: {i + 1}/{sizeee}", end="\r")
+
         
         print(" ")
 
@@ -124,20 +150,26 @@ def trainModel(model, train, epochs, noiseStrength):
         loss = loss / len(train)
         lossArr.append(loss)
         bestLoss = loss
+
+        valLoss = evaluateLoss(model, val)
+        valLossArr.append(valLoss)
+
         # display the epoch training loss
         print("epoch : {}/{}, loss = {:.6f}".format(epoch + 1, epochs, loss))
-        path = "denoiser_loss{:.6f}".format(loss)
-        if(loss < 0.014):
-            torch.save(model.state_dict(), path)
+        path = "denoiserModel_loss{:.6f}".format(loss)
+        if(loss < 0.0125):
+            torch.save(model, path)
 
-    plt.plot(range(epochs), lossArr)
+    plt.plot(range(epochs), valLossArr, 'r', label="Validation")
+    plt.plot(range(epochs), lossArr, 'b', label="Training")
     plt.xlabel("Epochs")
     plt.ylabel("Loss")
+    plt.legend(loc="upper right")
     plt.title(f"Denoiser Training Error, Loss: {bestLoss:.6f}")
     plt.savefig(f"Denoiser Training Error, Loss_{bestLoss:.6f}.png")
 
 def main():
-    noiseStrength = 0.4
+    noiseStrength = 0.3
     epochs = 30
     batchSize = 48
 
@@ -155,11 +187,11 @@ def main():
     model.cuda()
 
 
-    loadModel(noiseStrength, validationBatch, "./denoiser_loss0.012320")
+    loadModel(noiseStrength, validationBatch, "./denoiserModel_loss0.012422", 1)
 
     return
 
-    trainModel(model, train, epochs, noiseStrength)
+    trainModel(model, train, val, epochs, noiseStrength)
 
 
     for i in range(4):
