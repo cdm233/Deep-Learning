@@ -1,7 +1,10 @@
+from cProfile import label
 import time
 import os
-from unittest import TestLoader
+from unittest import result
+from urllib.request import ProxyBasicAuthHandler
 import numpy as np
+from sklearn.metrics import confusion_matrix
 import torch
 import torchvision
 from torchvision import datasets, models, transforms
@@ -13,6 +16,7 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 import random
+import seaborn as sns
 
 # classes are folders in each directory with these names
 useGPU = True
@@ -20,13 +24,15 @@ classes = ['Cloth', 'Glass', 'Hazardous Waste',
            'Metal', 'Organic', 'Other', 'Paper', 'Plastic']
 
 # custom dataset class for loading data from array to create pytorch dataloader
+
+
 class dataSetLoader(Dataset):
     def __init__(self, data):
         self.data = data
-        
+
     def __getitem__(self, index):
         return self.data[index][0], self.data[index][1]
-    
+
     def __len__(self):
         return len(self.data)
 
@@ -39,10 +45,14 @@ def getFolderPath(data_dir):
 
     return (train_dir, val_dir, test_dir)
 
+def getNewLR(origin, epoch:int):
+    return origin*torch.e ** (-epoch/20)
+
 def evaluate(net, loader, criterion):
     softMax = nn.Softmax(dim=1)
     total_err = 0.0
     total_epoch = 0
+    totalLoss = 0.
     for i, data in enumerate(loader, 0):
         inputs, labels = data
 
@@ -51,16 +61,20 @@ def evaluate(net, loader, criterion):
             labels = labels.cuda()
 
         outputs = softMax(net(inputs))
-        
+        loss = criterion(outputs, labels)
+
         for labelIndex, output in enumerate(outputs, 0):
             result = torch.argmax(output)
             if(result != labels[labelIndex]):
                 total_err += 1
 
         total_epoch += len(labels)
-        
+        totalLoss += loss.item()
+
     err = float(total_err) / total_epoch
-    return err
+    loss = float(totalLoss / (i + 1))
+    return err, loss
+
 
 def loadData(root, batchSize=1):
     print("Start loading data...")
@@ -77,6 +91,11 @@ def loadData(root, batchSize=1):
         transforms.RandomEqualize(),
         transforms.ToTensor()])
 
+    dataTransformNoAug = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+
     # Set up numpy arrays to store rotated images
     augmented_train_data = []
     augmented_validation_data = []
@@ -84,27 +103,34 @@ def loadData(root, batchSize=1):
 
     # Randomly rotate the images four times and get four images with different angles
     for i in range(1):
+        train_data = None
+        validation_data = None
+        test_data = None
         print(f"  Rotation {i}...")
-        train_data = datasets.ImageFolder(train_dir, transform=data_transform)
-        validation_data = datasets.ImageFolder(val_dir, transform=data_transform)
-        test_data = datasets.ImageFolder(test_dir, transform=data_transform)
+        if(i == 0):
+            train_data = datasets.ImageFolder(train_dir, transform=dataTransformNoAug)
+            validation_data = datasets.ImageFolder(val_dir, transform=dataTransformNoAug)
+            test_data = datasets.ImageFolder(test_dir, transform=dataTransformNoAug)
+
+            for j, item in enumerate(validation_data):
+                augmented_validation_data.append(item)
+                print(
+                    f"    {j + 1}/{len(validation_data.samples)} validation samples loaded...", end='\r')
+
+            print(" ")
+            for j, item in enumerate(test_data):
+                augmented_test_data.append(item)
+                print(
+                    f"    {j + 1}/{len(test_data.samples)} testing samples loaded...", end='\r')
+            print(" ")
+        else:
+            train_data = datasets.ImageFolder(train_dir, transform=data_transform)
 
         for j, item in enumerate(train_data):
-            augmented_train_data.append(item)
-            print(
-                f"    {j + 1}/{len(train_data.samples)} training samples loaded...", end='\r')
+                augmented_train_data.append(item)
+                print(
+                    f"    {j + 1}/{len(train_data.samples)} training samples loaded...", end='\r')
 
-        print(" ")
-        for j, item in enumerate(validation_data):
-            augmented_validation_data.append(item)
-            print(
-                f"    {j + 1}/{len(validation_data.samples)} validation samples loaded...", end='\r')
-
-        print(" ")
-        for j, item in enumerate(test_data):
-            augmented_test_data.append(item)
-            print(
-                f"    {j + 1}/{len(test_data.samples)} testing samples loaded...", end='\r')
         print(" ")
 
     endTime = time.time()
@@ -114,14 +140,15 @@ def loadData(root, batchSize=1):
 
     return (augmented_train_data, augmented_validation_data, augmented_test_data)
 
+
 def getTransferModel(gradTrack=False):
     print("Loading resNet50...")
     resNet = torchvision.models.resnet50(pretrained=True)
     resNet.eval()
 
     if(useGPU):
-            resNet.cuda()
-            print("  Loaded network to GPU")
+        resNet.cuda()
+        print("  Loaded network to GPU")
 
     if(not gradTrack):
         for param in resNet.parameters():
@@ -132,27 +159,40 @@ def getTransferModel(gradTrack=False):
 
     return resNet
 
-def train(net, trainSet, valSet, batchSize, learningRate = 0.005, momentum = 0.1, epochSize = 1):
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=learningRate, momentum=momentum)
 
-    torch.manual_seed(100)
+def train(net, trainSet, valSet, batchSize, learningRate=0.005, epochSize=1, dropOut=-1):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(net.parameters(), lr=learningRate, weight_decay=0.0001)    
 
     errorTrainArr = []
     errorValArr = []
+    lossValArr = []
+    lossTrainArr = []
 
     print("Start Training Process")
+    print("Training Parameter: ")
+    print(f" Learning Rate: {learningRate}")
+    print(f" EpochSize: {epochSize}")
+    print(f" batchSize: {batchSize}")
+    
+    net.train()
+
     for epoch in range(epochSize):
+        # learningRate = getNewLR(originLR, epoch)
+        
+        print(f" Current Learning Rate: {learningRate}")
+
         print(" Training on Epoch", epoch, "/", epochSize - 1)
         sampleIndex = 0
         startTime = time.time()
         for imgs, labels in trainSet:
-            print("  Training on Batch", sampleIndex, "/", len(trainSet) - 1, end="\r")
+            print("  Training on Batch", sampleIndex,
+                  "/", len(trainSet) - 1, end="\r")
 
             if(useGPU):
                 imgs = imgs.cuda()
                 labels = labels.cuda()
-                
+
             optimizer.zero_grad()
             output = net(imgs)
             loss = criterion(output, labels)
@@ -160,110 +200,212 @@ def train(net, trainSet, valSet, batchSize, learningRate = 0.005, momentum = 0.1
             optimizer.step()
             sampleIndex += 1
 
-        net.eval()
         print(" ")
         endTime = time.time()
         # evaluate current model performance on validation set
         print("  Evaluating on Validation Set...")
-        valEr = evaluate(net, valSet, criterion)
-        print("  Evaluating on Train Set...")
-        # trainEr = evaluate(net, trainSet, criterion)
-        errorValArr.append(valEr)
-        # errorTrainArr.append(trainEr)
-        print("  Current Validation Error:", valEr)
-        # print("  Current Train Error:", trainEr)
-        print("  Epoch Time:", endTime - startTime, "Seconds")
+
+        net.eval()
+        valEr, valLoss = evaluate(net, valSet, criterion)
+        trainEr, trainLoss = evaluate(net, trainSet, criterion)
         net.train()
 
-        path = "model_lr{0}_mo{1}_epoch{2}_bs{3}_err{4}".format(learningRate,
-                                                   momentum,
-                                                   epoch,
-                                                   batchSize,
-                                                   valEr)
+        print("  Evaluating on Train Set...")
+        trainEr = evaluate(net, trainSet, criterion)
+        lossValArr.append(valLoss)
+        errorValArr.append(valEr)
+        lossTrainArr.append(trainLoss)
+        errorTrainArr.append(trainEr)
+        errorTrainArr.append(trainEr)
+
+        print("  Current Train Error:", trainEr)
+        print("  Current Train Error:", trainEr)
+        print("  Epoch Time:", endTime - startTime, "Seconds")
+
+        path = "model_err{3}_lr{0}_epoch{1}_bs{2}_do{4}".format(learningRate,
+                                                                epoch,
+                                                                batchSize,
+                                                                trainEr,
+                                                                dropOut)
+
         # save current model
-        # torch.save(net.state_dict(), path)
-    
+        if(valEr < 0.045):
+            torch.save(net.state_dict(), path)
+
     print("Training Finished! ")
 
-    plt.plot(range(epoch + 1), errorValArr, 'r', label="Validation")
-    # plt.plot(range(epoch + 1), errorTrainArr, 'b', label="Training")
-    plt.title(f"Learning Rate {learningRate}, Momentum {momentum}, Epoch {epochSize}")
+    plt.plot(range(1, epoch + 2), lossTrainArr, 'g', label="Training")
+    plt.plot(range(1, epoch + 2), lossValArr, 'r', label="Validation")
+    plt.title(f"Model Performance evaluated on Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend(loc="upper right")
+    plt.savefig(f"ModelPerformanceLoss.png")
+    plt.clf()
+
+    plt.plot(range(1, epoch + 2), errorTrainArr, 'g', label="Training")
+    plt.plot(range(1, epoch + 2), errorValArr, 'r', label="Validation")
+    plt.title(f"Model Performance evaluated on Error")
+    plt.title(f"Model Sanity Check")
     plt.xlabel("Epoch")
     plt.ylabel("Error")
     plt.legend(loc="upper right")
+    plt.savefig(f"ModelPerformanceError.png")
+    plt.clf()
+
+def generateConfusionMatrix(net, valLoader):
+    print("Generating Confusion Matrix")
+    net.eval()
+    labelsArr = []
+    predictArr = []
+    for i, (img, label) in enumerate(valLoader, 0):
+        img = img.cuda()
+        output = net(img)
+        output = torch.argmax(output)
+        output = output.cpu()
+        output = output.item()
+        label = label.item()
+        labelsArr.append(label)
+
+        predictArr.append(output)
+
+    labelsArr = np.asarray(labelsArr)
+    predictArr = np.asarray(predictArr)
+
+    matrix = confusion_matrix(labelsArr, predictArr, normalize="true")
+    sns.heatmap(matrix.T, square=True, annot=True, cbar=False)
+    plt.title("Model Confusion Matrix")
+    plt.xlabel('True Label')
+    plt.ylabel('Predicted Label')
+    plt.xticks(ticks=[0,1,2,3,4,5,6,7], labels=classes, rotation=20)
+    plt.yticks(ticks=[0,1,2,3,4,5,6,7], labels=classes, rotation=20)
+    plt.savefig('Confusion Matrix: Primary Model.png')
     plt.show()
-        
+
+    return
+
+def calculateParameters(resNet):
+    totalP = 0
+    classP = 0
+    
+    for param in resNet.parameters():
+        temp = param.size()
+        count = 1
+        for i in temp:
+            count *= i
+        totalP += count
+
+    for param in resNet.fc.parameters():
+        temp = param.size()
+        count = 1
+        for i in temp:
+            count *= i
+        classP += count
+    
+    return totalP, classP
+
+def randomSearchHyper(resNet, trainLoader, valLoader):
+    batchSize = 1
+    learningRate = 0.000125
+    epochSize = 30
+    dropOutP = 0.05
+
+    learningRateSeq = [0.0005, 0.01]
+    batchSizeSeq = [1, 128]
+    dropOutSeq = [0.01, 0.3]
+
+    seqIndex = 0
+    seqMax = 60
+
+    while(seqIndex < seqMax):
+        # reinitialize model
+        resNet.fc = nn.Sequential(
+            nn.Linear(2048, 700),
+            nn.Dropout(inplace=True, p=dropOutP),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(700, 110),
+            nn.Dropout(inplace=True, p=dropOutP),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(110, 8)
+        )
+
+        if(useGPU):
+            # move FC layer to GPU
+            resNet.fc = resNet.fc.cuda()
+
+        batchSize = random.randint(batchSizeSeq[0], batchSizeSeq[1])
+        learningRate = random.uniform(learningRateSeq[0], learningRateSeq[1])
+        dropOutP = random.uniform(dropOutSeq[0], dropOutSeq[1])
+
+        # train net
+        train(resNet, trainLoader, valLoader, batchSize,
+              learningRate, epochSize, dropOutP)
+
+        seqIndex += 1
+
 def main():
     torch.manual_seed(100)
+
     # hyperparameter
-    batchSize = 48
-    learningRate = 0.009
-    momentum = 0.15
-    epochSize = 30
+    batchSize = 1
+    learningRate = 0.000125
+    epochSize = 20
+    dropOutP = 0.05
 
     global useGPU
+
     # if useGPU is enabled, check if cuda is supported
-    if(useGPU): 
+    if(useGPU):
         useGPU = torch.cuda.is_available()
 
     print(f"{['Not ', ''][useGPU]}Using GPU...")
+    trainAugmented, valAugmented, testAugmented = loadData(
+        "./APS360 Project Data", batchSize)
     resNet = getTransferModel(False)
 
-        # dummy FC layer for testing training code
     resNet.fc = nn.Sequential(
-            nn.Linear(2048, 699),
-            nn.Dropout(inplace=True, p=0.04403874256000241),
+            nn.Linear(2048, 512),
+            nn.Dropout(inplace=True, p=dropOutP),
             nn.ReLU(inplace=True),
 
-            nn.Linear(699, 125),
-            nn.Dropout(inplace=True, p=0.04403874256000241),
+            nn.Linear(512, 512),
+            nn.Dropout(inplace=True, p=dropOutP),
             nn.ReLU(inplace=True),
 
-            nn.Linear(125, 8)
+            nn.Linear(512, 8)
         )
-
-    trainAugmented, valAugmented, testAugmented = loadData("./APS360 Project Data", batchSize)
-   
-    criterion = nn.CrossEntropyLoss()
 
     if(useGPU):
         # move FC layer to GPU
-        resNet.fc = resNet.fc.cuda()
+        resNet.fc = resNet.fc.cuda()   
+
+    resNet.load_state_dict(torch.load("model_err0.03631532329495128_lr0.000125_mo0.06_epoch29_bs64_do0.05_op0"))
+
+    totalP, classP = calculateParameters(resNet)
+            
+    print(totalP, classP, totalP-classP)
+
+    criterion = nn.CrossEntropyLoss()
+
+    trainLoader = DataLoader(dataSetLoader(
+        trainAugmented), batch_size=batchSize, shuffle=True)
+    valLoader = DataLoader(dataSetLoader(
+        valAugmented), batch_size=batchSize, shuffle=True)
+    testLoader = DataLoader(dataSetLoader(testAugmented),
+                            batch_size=batchSize, shuffle=True)
     
-    # trainLoader = DataLoader(dataSetLoader(trainAugmented), batch_size=batchSize, shuffle=True)
-    # valLoader = DataLoader(dataSetLoader(valAugmented), batch_size=batchSize, shuffle=True)
-    # testLoader = DataLoader(dataSetLoader(testAugmented), batch_size=batchSize, shuffle=True)
 
-    # resNet.load_state_dict(torch.load("./model_err0.11603188662533215_lr0.0014018943853711103_mo0.05717632630403481_epoch8_bs48"))
-    # resNet.eval()
-    # resNet.cuda()
+    # train net
+    # train(resNet, trainLoader, valLoader, batchSize,
+    #         learningRate, epochSize, dropOutP)
 
-    # print("Error:", evaluate(resNet, testLoader, criterion))
-
-    # return
-
-    conTrain = False
-    while(True):
-        # crate data loaders
-        trainLoader = DataLoader(dataSetLoader(trainAugmented), batch_size=batchSize, shuffle=True)
-        valLoader = DataLoader(dataSetLoader(valAugmented), batch_size=batchSize, shuffle=True)
-        
-        # train net
-        train(resNet, trainLoader, valLoader, batchSize, learningRate, momentum, epochSize)
-
-        conTrain = int(input("Another round of training with different parameters? (yes=1, no=any other key): ")) == 1
-        if(conTrain):
-            learningRate = float(input(f"Learning Rate(Current:{learningRate}): "))
-            momentum = float(input(f"Momentum(Current:{momentum}): "))
-            epochSize = int(input(f"Epoch Size(Current:{epochSize}): "))
-            batchSize = int(input(f"Batch Size(Current:{batchSize}): "))
-        else:
-            break
+    resNet.load_state_dict(torch.load("./model_err0.03985828166519043_lr0.000125_mo0.06_epoch22_bs64_do0.05_op0"))
     
-    testLoader = DataLoader(dataSetLoader(testAugmented), batch_size=batchSize, shuffle=True)
+    generateConfusionMatrix(resNet, valLoader)
 
     print("Evaluating on Test Set...")
-    resNet.eval()
     testEr = evaluate(resNet, testLoader, criterion)
     print("Current Model Test Error: ", testEr)
 
