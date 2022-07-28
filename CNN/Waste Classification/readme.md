@@ -18,8 +18,8 @@ The hyperparameters are as below:
 ## Results
 Before prediction:
 
-![image](https://user-images.githubusercontent.com/80089456/181637015-4a01da06-ed12-41ea-a911-b2c61f1fd6e7.png)
+![image](https://user-images.githubusercontent.com/80089456/181637464-820842f6-0c59-4f76-a9e7-bf60dc01ae75.png)
 
 Prediction:
 
-![image](https://user-images.githubusercontent.com/80089456/181637051-b46a87a2-dcba-4a12-8f1a-48c32fd97d61.png)
+![image](https://user-images.githubusercontent.com/80089456/181637506-b9da75d5-3017-4916-83af-944b9bfeadde.png)
