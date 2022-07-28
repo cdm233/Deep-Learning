@@ -4,7 +4,7 @@
 
 The feature extractor is borrowed from ResNet50, and the classifier is designed by me.
 The hyperparameters are as below:
-![image](https://user-images.githubusercontent.com/80089456/181636852-be8cbe79-dc4a-404b-9a33-7e13edeb0e7b.png)
+![image](https://user-images.githubusercontent.com/80089456/181637231-556e8813-19b5-43a8-bc3f-ac0cdf751e78.png)
 
 ## Sanity Check
 ![ModelSanityCheck](https://user-images.githubusercontent.com/80089456/181636907-edc50f57-d8a0-4559-9af0-471d092e9156.png)
